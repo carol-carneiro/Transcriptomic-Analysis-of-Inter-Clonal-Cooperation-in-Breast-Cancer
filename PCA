@@ -1,0 +1,76 @@
+library(ggplot2)
+
+# 1. Load data
+deg <- read.csv("gene_fpkm_group.csv", row.names = 1, stringsAsFactors = FALSE)
+
+# 2. Define sample names and their group identities (No Erlotinib)
+sample_names <- c(
+  "CC1", "CC2", "CC3",   
+  "CCM1", "CCM2", "CCM3", 
+  "DC1", "DC2", "DC3"
+)
+
+# Define the exact order for the 3 remaining groups in the legend
+legend_order <- c(
+  "MCF7",
+  "MCF7 + CM",
+  "MDA"
+)
+
+# Create a metadata dataframe mapping for the 3 groups
+metadata <- data.frame(
+  SampleID = sample_names,
+  Group = factor(c(
+    rep("MCF7", 3),               # CC
+    rep("MCF7 + CM", 3),          # CCM
+    rep("MDA", 3)                 # DC
+  ), levels = legend_order)
+)
+
+# 3. Subset and Transpose
+deg_subset <- deg[, metadata$SampleID]
+deg_pca_input <- t(log2(deg_subset + 1)) 
+
+# Remove zero-variance genes
+deg_pca_input <- deg_pca_input[, apply(deg_pca_input, 2, var) != 0]
+
+# 4. Run PCA
+pca_res <- prcomp(deg_pca_input, center = TRUE, scale. = TRUE)
+
+# 5. Visualization Preparation
+pca_df <- as.data.frame(pca_res$x)
+pca_df$Group <- metadata$Group 
+
+# Calculate Variance
+pc_var <- round(100 * (pca_res$sdev^2 / sum(pca_res$sdev^2)), 1)
+
+# 6. Plotting Config (Updated for 3 groups)
+group_colors <- c(
+  "MCF7"      = "#1B9E77", 
+  "MCF7 + CM" = "#7570B3", 
+  "MDA"       = "#66A61E"
+)
+
+group_shapes <- c(
+  "MCF7"      = 13, 
+  "MCF7 + CM" = 15, 
+  "MDA"       = 19   
+)
+
+# 7. Generate Plot
+p <- ggplot(pca_df, aes(x = PC1, y = PC2, color = Group, shape = Group)) +
+  geom_point(size = 5) +
+  stat_ellipse(aes(fill = Group), geom = "polygon", alpha = 0.1, show.legend = FALSE) +
+  labs(title = "",
+       subtitle = "",
+       x = paste0("PC1 (", pc_var[1], "%)"),
+       y = paste0("PC2 (", pc_var[2], "%)")) +
+  theme_minimal() +
+  scale_color_manual(values = group_colors) +
+  scale_fill_manual(values = group_colors) +
+  scale_shape_manual(values = group_shapes)
+
+# 8. Save the plot
+ggsave("PCA_NO ERLO_Plot.png", plot = p, width = 9, height = 6, dpi = 300)
+
+write.csv(pca_df, "PCA.csv")
