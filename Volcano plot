@@ -1,0 +1,158 @@
+library(readr)
+library(ggplot2)
+library(dplyr)
+library(ggrepel)
+
+
+data_path <- "C:/Users/carol/OneDrive - University of New Brunswick/Transcriptomics/Filtered Data/New Analysis/48h/1.deglist/Manuscripts/Manuscript 3/DEGs"
+
+# 1. Read DESeq2 results
+deg_data <- read_csv(file.path(data_path,"CCMEvsCCM_deg.csv"))
+
+# 2. Thresholds
+log2fc_cutoff <- 1
+padj_cutoff <- 0.05
+
+# 3. Clean data and classify genes
+# 3. Clean data and classify genes
+deg_data <- deg_data %>%
+  filter(!is.na(padj),
+         !is.na(log2FoldChange)) %>%
+  mutate(
+    negLog10Padj = -log10(padj),
+    
+    group = case_when(
+      # Changed > to >= to include 1
+      padj < padj_cutoff & 
+        log2FoldChange >= log2fc_cutoff  ~ "Up",
+      
+      # Changed < to <= to include -1
+      padj < padj_cutoff & 
+        log2FoldChange <= -log2fc_cutoff ~ "Down",
+      
+      TRUE ~ "No"
+    )
+  )
+
+# 4. Convert to factor (controls legend order)
+deg_data$group <- factor(
+  deg_data$group,
+  levels = c("Up", "Down", "No")
+)
+
+# 5. Count genes
+up_n   <- sum(deg_data$group == "Up")
+down_n <- sum(deg_data$group == "Down")
+no_n   <- sum(deg_data$group == "No")
+
+# 6. Select top genes for labeling
+
+top_up <- deg_data %>%
+  filter(group == "Up") %>%
+  arrange(desc(log2FoldChange)) %>%
+  slice_head(n = 10)
+
+top_down <- deg_data %>%
+  filter(group == "Down") %>%
+  arrange(log2FoldChange) %>%
+  slice_head(n = 10)
+
+top_labels <- bind_rows(top_up, top_down)
+
+# 7. Make volcano plot
+
+volcano_plot <- ggplot(
+  deg_data,
+  aes(
+    x = log2FoldChange,
+    y = negLog10Padj,
+    color = group
+  )
+) +
+  
+  geom_point(
+    alpha = 0.6,
+    size = 1.5
+  ) +
+  
+  # Downregulated labels (left)
+  geom_text_repel(
+    data = filter(top_labels, group == "Down"),
+    aes(label = gene_name),
+    size = 3,
+    color = "grey30",
+    xlim = c(NA, -log2fc_cutoff),
+    force = 5,
+    max.overlaps = 20,
+    segment.size = 0.4,
+    seed = 42,
+    min.segment.length = 0
+  ) +
+  
+  # Upregulated labels (right)
+  geom_text_repel(
+    data = filter(top_labels, group == "Up"),
+    aes(label = gene_name),
+    size = 3,
+    color = "grey30",
+    xlim = c(log2fc_cutoff, NA),
+    force = 5,
+    max.overlaps = 20,
+    segment.size = 0.4,
+    seed = 42,
+    min.segment.length = 0
+  ) +
+  
+  # Colors
+  scale_color_manual(
+    values = c(
+      "Up" = "red",
+      "Down" = "green3",
+      "No" = "lightblue"
+    ),
+    
+    labels = c(
+      paste("Up", up_n),
+      paste("Down", down_n),
+      paste("No", no_n)
+    )
+  ) +
+  
+  # Threshold lines (now consistent)
+  geom_vline(
+    xintercept = c(
+      -log2fc_cutoff,
+      log2fc_cutoff
+    ),
+    linetype = "dashed",
+    color = "grey50"
+  ) +
+  
+  geom_hline(
+    yintercept = -log10(padj_cutoff),
+    linetype = "dashed",
+    color = "grey50"
+  ) +
+  
+  theme_minimal(base_size = 15) +
+  
+  labs(
+    x = "log2 Fold Change",
+    y = "-log10(adjusted p-value)",
+    color = "padj ≤ 0.05\n|log2FC| ≥ 1"
+  ) +
+  
+  coord_cartesian(clip = "off") +
+  
+  scale_y_continuous(
+    expand = expansion(mult = c(0.05, 0.15))
+  )
+
+# 8. Save figure
+ggsave(
+  "VolcanoPlot_CCME.png",
+  plot = volcano_plot,
+  width = 6,
+  height = 6,
+  dpi = 300
+)
