@@ -1,0 +1,51 @@
+library(dplyr)
+library(tools) # Essential for file_path_sans_ext
+
+# 1. Define the input filename as a string
+input_filename <- "gProfiler_down_classified.csv"
+
+# 2. Load the file using that string
+df <- read.csv(input_filename, stringsAsFactors = FALSE)
+
+# 3. Create the output filename using the STRING, not the dataframe
+file_base <- file_path_sans_ext(input_filename)
+output_filename <- paste0(file_base, "_representatives.csv")
+
+# ---------------------------------------------------------
+# 1. Process and Identify representatives
+# ---------------------------------------------------------
+df_final <- df %>%
+  # NEW: Exclude rows where parents is NA
+  filter(!is.na(parents)) %>% 
+  
+  # Identify representatives per source + parents
+  group_by(source, parents) %>%
+  mutate(
+    representative = negative_log10_of_adjusted_p_value == 
+      max(negative_log10_of_adjusted_p_value, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  
+  # Create priority columns for sorting
+  mutate(
+    highlight_flag = ifelse(is.na(highlight), 0, as.integer(highlight)),
+    representative_flag = as.integer(representative)
+  ) %>%
+  
+  # Arrange rows
+  arrange(
+    source, 
+    desc(highlight_flag), 
+    desc(representative_flag), 
+    desc(negative_log10_of_adjusted_p_value)
+  ) %>%
+  
+  # Remove helper flags (keeping 'representative' as it's useful)
+  select(-highlight_flag, -representative_flag)
+
+# ---------------------------------------------------------
+# 4. Save output
+# ---------------------------------------------------------
+write.csv(df_final, output_filename, row.names = FALSE)
+
+message(paste("Success! File saved as:", output_filename))
