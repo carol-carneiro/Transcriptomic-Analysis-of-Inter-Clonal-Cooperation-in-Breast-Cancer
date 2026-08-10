@@ -1,0 +1,74 @@
+library(VennDiagram)
+library(readr)
+
+# Read the file containing all the columns
+g_data <- read_csv("gene_fpkm_group.csv") 
+
+# Remove rows with NA in relevant columns
+g_data <- na.omit(g_data[, c("gene_id", "DC", "CC")])
+
+# Filter genes where DC >= 0.1 and CC >= 0.1
+genes_DC <- unique(g_data$gene_id[g_data$DC >= 0.1])
+genes_CC <- unique(g_data$gene_id[g_data$CC >= 0.1])
+
+# Find intersections and unique genes
+common_genes <- intersect(genes_DC, genes_CC)
+unique_DC <- setdiff(genes_DC, genes_CC)
+unique_CC <- setdiff(genes_CC, genes_DC)
+
+# Save the 3 individual primary list files
+write.csv(data.frame(Common_Genes = common_genes), "common_genes_DC_CC.csv", row.names = FALSE)
+write.csv(data.frame(Unique_DC_Genes = unique_DC), "unique_genes_DC.csv", row.names = FALSE)
+write.csv(data.frame(Unique_CC_Genes = unique_CC), "unique_genes_CC.csv", row.names = FALSE)
+
+# =========================================================================
+# NEW: Create and Export Summary Statistics Table to a Master CSV
+# =========================================================================
+summary_matrix <- data.frame(
+  Metric_Gene_Set = c(
+    "Intersection (Common Genes)",
+    "Unique to MDA Group Only",
+    "Unique to MCF7 Group Only",
+    "Total Genes with DC >= 0.1 (MDA)",
+    "Total Genes with CC >= 0.1 (MCF7)"
+  ),
+  Plot_Group_Label = c("Overlap", "MDA Only", "MCF7 Only", "MDA Total", "MCF7 Total"),
+  Threshold_Condition = c("DC >= 0.1 & CC >= 0.1", "DC >= 0.1 & CC < 0.1", "CC >= 0.1 & DC < 0.1", "DC >= 0.1", "CC >= 0.1"),
+  Gene_Count = c(
+    length(common_genes),
+    length(unique_DC),
+    length(unique_CC),
+    length(genes_DC),
+    length(genes_CC)
+  )
+)
+
+# Export the master metric overview to CSV
+write.csv(summary_matrix, "gene_analysis_summary_MDA_MCF7.csv", row.names = FALSE)
+cat("Master metrics summary successfully exported to 'gene_analysis_summary_MDA_MCF7.csv'\n")
+# =========================================================================
+
+# Generate Venn diagram
+venn.diagram(
+  x = list(
+    "MDA" = genes_DC,
+    "MCF7" = genes_CC
+  ),
+  filename = "Venn_Diagram_MDA_MCF7.png",
+  imagetype = "png",
+  height = 2000, 
+  width = 2000,
+  resolution = 300,
+  col = "black",
+  fill = c("#4EC1C4", "#FF6B6B"),
+  alpha = 0.3,
+  fontfamily = "sans",
+  cat.fontfamily = "sans",
+  cat.pos = c(-20, 20),
+  cat.dist = c(0.05, 0.05),
+  margin = 0.1,
+  cex = 1.5,
+  cat.cex = 1.3,
+  main = "",
+  main.cex = 2
+)
