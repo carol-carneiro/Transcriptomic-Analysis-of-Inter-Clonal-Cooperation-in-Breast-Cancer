@@ -1,0 +1,114 @@
+# --- Load Libraries ---
+library(GSVA)
+library(biomaRt)
+library(ggplot2)
+library(dplyr)
+library(msigdbr)
+
+packageVersion("pheatmap")
+
+
+# --- 1. Read and Clean Data ---
+gene_data <- read.csv("gene_fpkm.csv", 
+                      header = TRUE, 
+                      row.names = 1, 
+                      check.names = FALSE,
+                      stringsAsFactors = FALSE)
+
+# --- 2. Select Only Target Samples ---
+target_samples <- grep("^CC[1-3]$|^DC[1-3]$", colnames(gene_data), value = TRUE)
+gene_data_subset <- gene_data[, target_samples]
+
+# --- 3. Prepare Expression Matrix ---
+expr_matrix <- as.matrix(gene_data_subset)
+mode(expr_matrix) <- "numeric"
+expr_matrix[is.na(expr_matrix)] <- 0
+expr_matrix <- expr_matrix[rowSums(expr_matrix) > 0, ]
+expr_matrix <- log2(expr_matrix + 1)  # log-transform FPKM
+
+# --- 4. Map Ensembl IDs to HGNC Symbols if Needed ---
+if(any(grepl("^ENSG", rownames(expr_matrix)))) {
+  ensembl <- useEnsembl(biomart = "genes", dataset = "hsapiens_gene_ensembl")
+  mapping <- getBM(
+    attributes = c("ensembl_gene_id", "hgnc_symbol"),
+    filters = "ensembl_gene_id",
+    values = rownames(expr_matrix),
+    mart = ensembl
+  )
+  mapping <- mapping[mapping$hgnc_symbol != "", ]
+  common_ids <- intersect(rownames(expr_matrix), mapping$ensembl_gene_id)
+  expr_matrix <- expr_matrix[common_ids, ]
+  rownames(expr_matrix) <- mapping$hgnc_symbol[match(common_ids, mapping$ensembl_gene_id)]
+}
+
+# --- 5. Filter for Variance and Remove Duplicates ---
+expr_matrix <- expr_matrix[!duplicated(rownames(expr_matrix)), ]
+expr_matrix <- expr_matrix[apply(expr_matrix, 1, var) > 0, ]
+
+# --- 6. Load Hallmark EMT Gene Set ---
+h_df <- msigdbr(species = "Homo sapiens", category = "H")
+emt_genes <- h_df %>% 
+  filter(gs_name == "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION") %>% 
+  pull(gene_symbol)
+
+emt_sets <- list(
+  EMT_Hallmark = intersect(emt_genes, rownames(expr_matrix))
+)
+
+# --- 7. Run GSVA ---
+gsva_scores <- gsva(expr_matrix, emt_sets, method = "gsva", kcdf = "Gaussian", verbose = FALSE)
+emt_score <- gsva_scores["EMT_Hallmark", ]
+
+# --- 8. Prepare Data for Plotting ---
+emt_plot_df <- data.frame(
+  Sample = names(emt_score),
+  EMT_Score = emt_score
+) %>% 
+  mutate(Group = ifelse(grepl("^CC[1-3]$", Sample), "CC", "DC"),
+         Group_Label = recode(Group,
+                              "CC" = "MCF7",
+                              "DC" = "MDA"))
+
+emt_plot_df$Group_Label <- factor(emt_plot_df$Group_Label,
+                                  levels = c("MCF7", "MDA"))
+
+# --- 9. Statistical Test ---
+t_res <- t.test(EMT_Score ~ Group, data = emt_plot_df, var.equal = TRUE)
+p_val <- t_res$p.value
+p_label <- if(p_val < 0.001) "***" else if(p_val < 0.01) "**" else if(p_val < 0.05) "*" else "ns"
+p_text <- paste0("p = ", format.pval(p_val, digits = 3), " (", p_label, ")")
+
+# --- 10. Plot GSVA Scores ---
+y_max <- max(emt_plot_df$EMT_Score)
+y_range <- diff(range(emt_plot_df$EMT_Score))
+y_max <- max(emt_plot_df$EMT_Score)
+y_range <- diff(range(emt_plot_df$EMT_Score))
+
+ggplot(emt_plot_df, aes(x = Group_Label, y = EMT_Score, fill = Group)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_boxplot(width = 0.4, alpha = 0.5, color = "black", outlier.shape = NA) +
+  geom_point(size = 4, shape = 21, stroke = 1, color = "black",
+             position = position_jitter(width = 0.05, seed = 42)) +
+  
+  # Significance bracket
+  annotate("segment", x = 1, xend = 2, y = y_max + (y_range * 0.1), 
+           yend = y_max + (y_range * 0.1), linewidth = 1) + # Slightly thicker line
+  
+  # P-value: size 8 is significantly larger for annotations
+  annotate("text", x = 1.5, y = y_max + (y_range * 0.18), 
+           label = p_text, size = 8, fontface = "bold") + 
+  
+  scale_fill_manual(values = c("CC" = "#377eb8", "DC" = "#e41a1c")) +
+  labs(title = "", y = "GSVA Enrichment Score", x = "") +
+  
+  # Base size 20 scales everything up globally
+  theme_classic(base_size = 20) + 
+  theme(
+    text = element_text(face = "bold"),
+    axis.title.y = element_text(size = 22, margin = margin(r = 15)),
+    axis.text = element_text(size = 20, color = "black"),
+    # Add extra margin to the plot to prevent text clipping
+    plot.margin = margin(t = 20, r = 10, b = 10, l = 10),
+    legend.position = "none"
+  )
+
