@@ -1,0 +1,78 @@
+# 1. Load Libraries
+library(gprofiler2)
+library(readr)
+library(dplyr)
+
+# 2. Import your data
+data <- read_csv("genes_MDA_and_MCF7_CM_only_expression_and_annotation_protein_coding only.csv", show_col_types = FALSE)
+background <- read_csv("background.csv", show_col_types = FALSE)
+
+# 3. Prepare query and background
+my_query <- data %>%
+  pull(gene_name) %>%           # extract as vector
+  na.omit()
+
+pull(data, gene_name)
+
+my_universe <- na.omit(background$gene_name)
+
+# Assuming your data has a column "log2FC" (or similar) to define up-regulation
+
+# 4. Run enrichment analysis
+gost_results <- gost(
+  query = my_query, 
+  organism = "hsapiens",
+  ordered_query = FALSE, 
+  significant = TRUE,
+  exclude_iea = TRUE,
+  domain_scope = "known",
+  numeric_ns = "ENTREZGENE_ACC",
+  evcodes = TRUE,
+  user_threshold = 0.05,
+  correction_method = "fdr",
+  custom_bg = my_universe,
+  sources = c("GO:BP", "GO:MF", "GO:CC", "KEGG", "REAC")
+)
+
+# 5. Extract and clean results table
+if(!is.null(gost_results)) {
+  
+  # Convert result to dataframe
+  clean_results <- as.data.frame(gost_results$result)
+  
+  # Flatten list-columns for CSV export
+  clean_results[] <- lapply(clean_results, function(x) {
+    if(is.list(x)) sapply(x, paste, collapse = ", ") else x
+  })
+  
+  # Select only the columns you want in a clean table
+  clean_results <- clean_results %>%
+    mutate(negative_log10_of_adjusted_p_value = -log10(p_value)) %>%
+    select(
+      significant,
+      negative_log10_of_adjusted_p_value,
+      p_value,
+      term_size,
+      query_size,
+      intersection_size,
+      precision,
+      recall,
+      term_id,
+      source,
+      term_name,
+      effective_domain_size,
+      source_order,
+      parents,
+      intersection
+    ) %>%
+    arrange(p_value)
+  
+  
+  # Export clean table
+  write.csv(clean_results, "gProfiler_down.csv", row.names = FALSE)
+  
+  message("Success! Clean GProfiler table saved as 'gProfiler.csv'.")
+  
+} else {
+  message("No significant results found.")
+}
