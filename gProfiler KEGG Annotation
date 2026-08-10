@@ -1,0 +1,132 @@
+library(dplyr)
+library(stringr)
+library(httr)
+library(jsonlite)
+library(tools)
+library(tidyr) # Added for replace_na
+
+# ---------------------------------------------------------
+# 1. Load Data
+# ---------------------------------------------------------
+input_file <- "gProfiler_down_classified_representatives.csv"
+df_pathways <- read.csv(input_file, stringsAsFactors = FALSE)
+file_base <- file_path_sans_ext(input_file)
+
+# ---------------------------------------------------------
+# 2. Build KEGG Hierarchy Database
+# ---------------------------------------------------------
+message("Fetching KEGG hierarchy from API...")
+kegg_br_pathway <- readLines("https://rest.kegg.jp/get/br:br08901")
+
+results_list <- list()
+curr_A <- NA
+curr_B <- NA
+
+for (line in kegg_br_pathway) {
+  prefix <- str_extract(line, "^[A-C]")
+  content <- str_trim(str_remove(line, "^[A-C]")) %>% str_remove_all("<[^>]+>")
+  if (is.na(prefix)) next
+  if (prefix == "A") {
+    curr_A <- content
+  } else if (prefix == "B") {
+    curr_B <- content
+  } else if (prefix == "C") {
+    map_id <- str_extract(content, "[0-9]{5}")
+    if (!is.na(map_id)) {
+      results_list[[length(results_list) + 1]] <- data.frame(
+        map_id = map_id,
+        category = curr_A,
+        subcategory = curr_B,
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+}
+
+kegg_hierarchy_db <- bind_rows(results_list) %>% 
+  distinct(map_id, .keep_all = TRUE)
+
+# ---------------------------------------------------------
+# 3. Process and Annotate KEGG Hits
+# ---------------------------------------------------------
+df_kegg <- df_pathways %>% filter(source == "KEGG")
+
+if(nrow(df_kegg) > 0) {
+  df_kegg <- df_kegg %>%
+    mutate(join_id = str_extract(term_id, "[0-9]{5}")) %>%
+    left_join(kegg_hierarchy_db, by = c("join_id" = "map_id")) %>%
+    select(-any_of("join_id"))
+  
+  df_kegg$category <- ifelse(is.na(df_kegg$category), "Other/Unclassified", df_kegg$category)
+}
+
+# ---------------------------------------------------------
+# 4. Identify Representative Pathways (KEGG Logic)
+# ---------------------------------------------------------
+selected_kegg <- c("Environmental Information Processing", "Cellular Processes", "Organismal Systems")
+
+# We save this as df_kegg_processed to use in the final merge
+df_kegg_processed <- df_kegg %>%
+  mutate(negative_log10_of_adjusted_p_value = as.numeric(negative_log10_of_adjusted_p_value)) %>%
+  mutate(
+    group_var = case_when(
+      (category %in% selected_kegg | subcategory == "Cancer: overview") & 
+        !is.na(subcategory) & subcategory != "" ~ subcategory,
+      (category %in% selected_kegg | subcategory == "Cancer: overview") ~ category,
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  group_by(group_var) %>%
+  mutate(
+    representative = ifelse(
+      !is.na(group_var) & 
+        !is.na(negative_log10_of_adjusted_p_value) &
+        negative_log10_of_adjusted_p_value == max(negative_log10_of_adjusted_p_value, na.rm = TRUE),
+      TRUE,
+      FALSE
+    )
+  ) %>%
+  mutate(representative = ifelse(representative & row_number() == 1, TRUE, representative)) %>%
+  ungroup() %>%
+  mutate(
+    representative = case_when(
+      !(category %in% selected_kegg | subcategory == "Cancer: overview") ~ NA,
+      TRUE ~ representative
+    )
+  ) %>%
+  select(-group_var)
+
+# ---------------------------------------------------------
+# 5. Process Other Sources (RE-ORDERING LOGIC)
+# ---------------------------------------------------------
+# ---------------------------------------------------------
+# 5. Process Other Sources
+# ---------------------------------------------------------
+df_others <- df_pathways %>%
+  filter(source != "KEGG") %>%
+  arrange(
+    source, 
+    is.na(representative),                         # Pushes NA representatives to bottom of source
+    desc(coalesce(as.logical(highlight), FALSE)), 
+    desc(coalesce(as.logical(representative), FALSE)),
+    desc(as.numeric(negative_log10_of_adjusted_p_value))
+  )
+
+# ---------------------------------------------------------
+# 6. Merge and Final Global Sort
+# ---------------------------------------------------------
+df_final_replaced <- bind_rows(df_others, df_kegg_processed) %>%
+  arrange(
+    source, 
+    is.na(representative),                         # NA is treated as TRUE (1), so it goes after FALSE (0)
+    desc(coalesce(as.logical(highlight), FALSE)), 
+    desc(coalesce(as.logical(representative), FALSE)),
+    desc(as.numeric(negative_log10_of_adjusted_p_value))
+  )
+# ---------------------------------------------------------
+# 7. Save Final Output
+# ---------------------------------------------------------
+final_output_name <- paste0(file_base, "_final.csv")
+write.csv(df_final_replaced, final_output_name, row.names = FALSE)
+
+message("Success! Final merged and sorted file saved as: ", final_output_name)
