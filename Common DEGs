@@ -1,0 +1,74 @@
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(pheatmap)
+
+# Load your data
+df <- read.csv(".csv")
+
+# ---- Filter and Sort from Lower to Higher ----
+# Changed n = 10 to get a true "Top 20" (10 up + 10 down) as per your filename
+top_up <- df %>% slice_max(order_by = log2FoldChange_CCME, n = 10)
+top_down <- df %>% slice_min(order_by = log2FoldChange_CCME, n = 10)
+
+# Bind and explicitly arrange from most negative to most positive
+df_top20 <- bind_rows(top_up, top_down) %>%
+  distinct(gene_name_CCME, .keep_all = TRUE) %>% # Prevents duplicates if an item is in both
+  arrange(log2FoldChange_CCME)
+
+# CRITICAL STEP: Lock in the gene order based on log2FoldChange_CCME 
+# This ensures BOTH the bar plot and heatmap share the exact same sequence.
+df_top20$gene_name_CCME <- factor(df_top20$gene_name_CCME, levels = df_top20$gene_name_CCME)
+
+# ---- Convert to long format for bar plot ----
+df_long <- df_top20 %>%
+  dplyr::select(gene_name_CCME, log2FoldChange_CCME, log2FoldChange_CCM) %>%
+  pivot_longer(cols = c(log2FoldChange_CCME, log2FoldChange_CCM),
+               names_to = "CellLine",
+               values_to = "log2FC") %>%
+  mutate(CellLine = case_match(CellLine,
+                               "log2FoldChange_CCME" ~ "MDA + Erlotinib vs MDA",
+                               "log2FoldChange_CCM"  ~ "MCF7 + CM + Erlotinib vs MCF7 + CM"))
+
+# ---- Create bar plot ----
+bar_plot <- ggplot(df_long, aes(x = gene_name_CCME, y = log2FC, fill = CellLine)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+        legend.position = "top") +
+  labs(title = "Top Differentially Expressed Genes",
+       y = "log2 Fold Change",
+       x = "Gene",
+       fill = "Condition")
+
+# Display the bar plot
+print(bar_plot)
+
+# ---- Prepare heatmap matrix ----
+df_heatmap <- df_top20 %>%
+  dplyr::select(log2FoldChange_CCME, log2FoldChange_CCM) %>%
+  rename("MDA + Erlotinib vs MDA" = log2FoldChange_CCME,
+         "MCF7 + CM + Erlotinib vs MCF7 + CM" = log2FoldChange_CCM)
+
+heatmap_matrix <- as.matrix(df_heatmap)
+rownames(heatmap_matrix) <- as.character(df_top20$gene_name_CCME)
+
+# ---- Create heatmap ----
+# Note: Since you are exporting directly to a file, it won't print to your IDE screen.
+pheatmap(heatmap_matrix,
+         scale = "none",
+         cluster_rows = FALSE,   # Keeps the hardcoded factor order (negative to positive)
+         cluster_cols = FALSE,
+         fontsize_row = 12,
+         fontsize_col = 12,
+         angle_col = 45,
+         
+         # Adjustments to prevent cutting text
+         cellwidth = 80,
+         cellheight = 18,
+         border_color = "grey",
+         
+         main = "Heatmap of Top DEGs",
+         filename = "Heatmap_Common_DEGs_MDA_vs_MCF7+CM+ERLO_TOP_20.png",
+         width = 10,
+         height = 8)
