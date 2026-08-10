@@ -1,0 +1,46 @@
+library(tidyverse)
+library(ggplot2)
+library(readr)
+library(tools) # Required for file_path_sans_ext
+
+# Load g:Profiler results
+gprofiler_file <- "gProfiler_down.csv"
+
+# --- Dynamic Filename Logic ---
+# This extracts "gProfiler_up" from "gProfiler_down.csv"
+file_base <- file_path_sans_ext(gprofiler_file)
+output_filename <- paste0(file_base, "_classified.csv")
+# ------------------------------
+
+df_gp <- read_csv(gprofiler_file)
+
+# 1. Define keywords (Migration, Signaling, Cancer, Unwanted)
+migration_keywords <- "migration|motility|locomotion|chemotaxis|invasion|adhesion|focal adhesion|extracellular matrix|ECM|cytoskeleton|actin|protrusion|lamellipodium|filopodium|invadopodium"
+signal_keywords <- "response to|signaling|signaling pathway|signal transduction|stimulus|cascade|growth factor|cytokine"
+cancer_signal_keywords <- "estrogen|TGF|EGF|ERBB|MAPK|ERK|PI3K|AKT"
+unwanted_keywords <- "growth|proliferation|DNA|RNA|cis-regulatory|development|histone|expression|differentiation|translation|metabolic|biosynthetic|nucleic|chromatin|promoter|methylated|ribosome|mitochond"
+
+# 2. Cleaning + tagging
+df_cleaned <- df_gp %>%
+  mutate(log_pval = negative_log10_of_adjusted_p_value) %>%
+  
+  # Tag categories
+  mutate(
+    is_migration = str_detect(term_name, regex(migration_keywords, ignore_case = TRUE)),
+    is_signaling = str_detect(term_name, regex(signal_keywords, ignore_case = TRUE)),
+    is_cancer_signal = str_detect(term_name, regex(cancer_signal_keywords, ignore_case = TRUE))
+  ) %>%
+  
+  # Highlight logic with NA for unwanted terms
+  mutate(
+    highlight = case_when(
+      str_detect(term_name, regex(unwanted_keywords, ignore_case = TRUE)) ~ NA,
+      if_any(starts_with("is_"), ~ .x) ~ TRUE, # Updated . to .x for modern rlang consistency
+      TRUE ~ FALSE
+    )
+  )
+
+# 3. Save cleaned dataset using the dynamic name
+write_csv(df_cleaned, output_filename)
+
+message(paste("File successfully saved as:", output_filename))
