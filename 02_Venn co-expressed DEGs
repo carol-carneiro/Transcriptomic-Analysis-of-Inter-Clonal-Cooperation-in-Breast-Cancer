@@ -1,0 +1,240 @@
+# -----------------------------------------------------------------------------
+# DEG overlap between contrasts: Venn, heatmap and bar plot
+#
+# Manuscript section : Methods - Gene Quantification and Differential Expression;
+#                      adjusted p <= 0.05 and |log2FC| > 1
+# Input              : two or three DESeq2 result tables (see CONFIG below)
+# Output             : <prefix>_Venn.png
+#                      <prefix>_Heatmap.png
+#                      <prefix>_Barplot.png            (optional)
+#                      <prefix>_common_DEGs.csv
+#                      <prefix>_unique_<contrast>.csv  (one per contrast)
+#
+# Replaces three earlier scripts that each did part of this:
+#   Venn DEGs.R                 2-way Venn + common-DEG heatmap
+#   Common DEGs.R               top-20 up/down bar plot + heatmap
+#   Common DEGs - all 3.R       3-way Venn + top-20 common heatmap
+#
+# Contrast codes used in the DESeq2 filenames:
+#   CC   = MCF7 (naive)        CCM = MCF7 + MDA conditioned medium
+#   DC   = MDA-MB-231          CE / CCME / DE = the corresponding + Erlotinib
+# -----------------------------------------------------------------------------
+
+library(VennDiagram)
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(grid)
+library(pheatmap)
+
+
+# =============================================================================
+# CONFIG - everything you normally need to change lives here
+# =============================================================================
+
+# Folder holding the DESeq2 result tables, relative to your working directory.
+# Use "." if you run the script from the folder that contains them.
+data_path <- "."
+
+# Two or three contrasts, as "display label" = "file name".
+# List the contrast with the MOST DEGs first: for a 2-way Venn it is drawn on
+# the left, and row ordering defaults to it.
+contrasts <- c(
+  "MDA vs MCF7"     = "DCvsCC_deg.csv",
+  "MCF7+CM vs MCF7" = "CCMvsCC_deg.csv"
+)
+
+# Significance thresholds
+lfc_cutoff  <- 1
+padj_cutoff <- 0.05
+
+# Heatmap gene selection
+top_n        <- 20      # max genes to plot; NA keeps every common gene
+top_rule     <- "abs"   # "abs"    = largest mean |log2FC| across contrasts
+                        # "updown" = top_n/2 most up- and most down-regulated
+cluster_rows <- TRUE    # FALSE keeps the fold-change ordering instead
+make_barplot <- TRUE
+
+out_prefix <- "DEGs_MDA_vs_MCF7__MCF7CM_vs_MCF7"
+
+# ---- Appearance (unchanged from the original scripts) ----
+venn_fill_2 <- c("#4EC1C4", "#FF6B6B")              # 2-way: left, right
+venn_fill_3 <- c("#FF6B6B", "#4EC1C4", "#FFD93D")   # 3-way: in `contrasts` order
+heatmap_colours <- colorRampPalette(
+  rev(RColorBrewer::brewer.pal(n = 11, name = "RdYlBu"))
+)(100)
+
+
+# =============================================================================
+# HELPERS
+# =============================================================================
+
+# Significant DEG identifiers for one result table
+sig_ids <- function(df) {
+  df %>%
+    filter(abs(log2FoldChange) >= lfc_cutoff, padj < padj_cutoff) %>%
+    pull(gene_id) %>%
+    unique()
+}
+
+# File-safe version of a label, e.g. "MCF7+CM vs MCF7" -> "MCF7_CM_vs_MCF7"
+tag <- function(x) gsub("^_+|_+$", "", gsub("[^A-Za-z0-9]+", "_", x))
+
+# Two-set Venn, drawn with the larger set on the left
+venn_2 <- function(sets, labels, file) {
+  p <- draw.pairwise.venn(
+    area1      = length(sets[[1]]),
+    area2      = length(sets[[2]]),
+    cross.area = length(intersect(sets[[1]], sets[[2]])),
+    category   = labels,
+    scaled     = FALSE,
+    fill       = venn_fill_2,
+    alpha      = 0.3,
+    fontfamily = "sans",
+    col        = "black",
+    cex        = 1.5,
+    cat.cex    = 1.4,
+    cat.fontfamily   = "sans",
+    margin           = 0.2,
+    cat.pos          = c(-50, 50),
+    cat.dist         = c(0.1, 0.1),
+    cat.default.pos  = "outer"
+  )
+  png(file, width = 2800, height = 2800, res = 300)
+  grid.draw(p)
+  dev.off()
+}
+
+# Three-set Venn
+venn_3 <- function(sets, labels, file) {
+  names(sets) <- labels
+  p <- venn.diagram(
+    x        = sets,
+    filename = NULL,
+    fill     = venn_fill_3,
+    alpha    = 0.4,
+    col      = "black",
+    cex      = 1.5,
+    cat.cex  = 1.5,
+    margin   = 0.2,
+    cat.pos  = c(-20, 20, 180),
+    cat.dist = c(0.05, 0.05, 0.05),
+    cat.just = list(c(0.8, 0.8), c(0.38, 0.8), c(0.5, 0.5))
+  )
+  png(file, width = 2500, height = 2500, res = 300)
+  grid.draw(p)
+  dev.off()
+}
+
+
+# =============================================================================
+# 1. LOAD AND FILTER
+# =============================================================================
+
+labels   <- names(contrasts)
+deg_data <- lapply(contrasts, function(f) read_csv(file.path(data_path, f),
+                                                   show_col_types = FALSE))
+deg_sets <- lapply(deg_data, sig_ids)
+names(deg_data) <- names(deg_sets) <- labels
+
+stopifnot(length(labels) %in% c(2, 3))
+
+
+# =============================================================================
+# 2. INTERSECTIONS
+# =============================================================================
+
+common_genes <- Reduce(intersect, deg_sets)
+
+unique_genes <- lapply(labels, function(l)
+  setdiff(deg_sets[[l]], Reduce(union, deg_sets[setdiff(labels, l)])))
+names(unique_genes) <- labels
+
+for (l in labels) {
+  cat("Significant DEGs (", l, "): ", length(deg_sets[[l]]),
+      "  | unique to it: ", length(unique_genes[[l]]), "\n", sep = "")
+}
+cat("Common to all ", length(labels), " contrasts: ", length(common_genes), "\n", sep = "")
+
+# Save the gene lists with their full DESeq2 metadata
+for (l in labels) {
+  deg_data[[l]] %>%
+    filter(gene_id %in% unique_genes[[l]]) %>%
+    write_csv(paste0(out_prefix, "_unique_", tag(l), ".csv"))
+}
+
+
+# =============================================================================
+# 3. VENN
+# =============================================================================
+
+venn_file <- paste0(out_prefix, "_Venn.png")
+if (length(labels) == 2) {
+  venn_2(deg_sets, labels, venn_file)
+} else {
+  venn_3(deg_sets, labels, venn_file)
+}
+
+
+# =============================================================================
+# 4. FOLD-CHANGE MATRIX FOR THE COMMON GENES
+# =============================================================================
+
+# One column of log2FC per contrast, plus gene_name taken from the first table
+lfc <- deg_data[[1]] %>%
+  filter(gene_id %in% common_genes) %>%
+  select(gene_id, gene_name)
+
+for (l in labels) {
+  lfc <- lfc %>%
+    inner_join(deg_data[[l]] %>% select(gene_id, !!l := log2FoldChange),
+               by = "gene_id")
+}
+
+write_csv(lfc, paste0(out_prefix, "_common_DEGs.csv"))
+
+# Reduce to the genes that will be plotted
+if (!is.na(top_n) && nrow(lfc) > top_n) {
+  if (top_rule == "updown") {
+    half <- floor(top_n / 2)
+    lfc <- bind_rows(
+      lfc %>% slice_max(.data[[labels[1]]], n = half),
+      lfc %>% slice_min(.data[[labels[1]]], n = half)
+    ) %>% distinct(gene_id, .keep_all = TRUE)
+  } else {
+    lfc <- lfc %>%
+      mutate(mean_abs_lfc = rowMeans(abs(across(all_of(labels))))) %>%
+      slice_max(mean_abs_lfc, n = top_n) %>%
+      select(-mean_abs_lfc)
+  }
+}
+
+# Order rows by the first contrast, most negative to most positive
+lfc <- lfc %>% arrange(.data[[labels[1]]])
+
+heatmap_matrix <- as.matrix(lfc[, labels, drop = FALSE])
+rownames(heatmap_matrix) <- lfc$gene_name
+
+
+# =============================================================================
+# 5. HEATMAP
+# =============================================================================
+
+pheatmap(
+  heatmap_matrix,
+  scale        = "none",          # cells are log2 fold changes already
+  cluster_rows = cluster_rows,
+  cluster_cols = FALSE,
+  color        = heatmap_colours,
+  fontsize_row = 14,
+  fontsize_col = 14,
+  angle_col    = 45,
+  cellwidth    = 100,
+  cellheight   = 20,
+  border_color = "grey",
+  main         = "",
+  filename     = paste0(out_prefix, "_Heatmap.png"),
+  width        = 10,
+  height       = 10
+)
