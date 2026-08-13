@@ -1,0 +1,114 @@
+# -----------------------------------------------------------------------------
+# Over-representation analysis with g:Profiler, up- and down-regulated separately
+#
+# Input  : a DESeq2 result table with gene_name, log2FoldChange, padj
+#          background.csv  (single column: gene_name)
+# Output : gProfiler_up.csv, gProfiler_down.csv, gProfiler_all.csv
+# -----------------------------------------------------------------------------
+
+library(gprofiler2)
+library(readr)
+library(dplyr)
+
+# ---- CONFIG ----
+deg_file        <- "DCvsCC_deg.csv"   # e.g. DCvsCC_deg.csv or CCMvsCC_deg.csv
+background_file <- "background.csv"
+
+lfc_cutoff  <- 1
+padj_cutoff <- 0.05
+
+run_sets <- c("up", "down", "all")
+sources  <- c("GO:BP", "GO:MF", "GO:CC", "KEGG", "REAC")
+
+
+# ---- 1. Load and split the DEGs ----
+deg <- read_csv(deg_file, show_col_types = FALSE)
+stopifnot(all(c("gene_name", "log2FoldChange", "padj") %in% colnames(deg)))
+
+deg <- deg %>% filter(!is.na(gene_name), gene_name != "",
+                      !is.na(log2FoldChange), !is.na(padj))
+
+genes_up <- deg %>%
+  filter(padj <= padj_cutoff, log2FoldChange >= lfc_cutoff) %>%
+  pull(gene_name) %>% unique()
+
+genes_down <- deg %>%
+  filter(padj <= padj_cutoff, log2FoldChange <= -lfc_cutoff) %>%
+  pull(gene_name) %>% unique()
+
+gene_sets <- list(up = genes_up, down = genes_down,
+                  all = union(genes_up, genes_down))
+
+background  <- read_csv(background_file, show_col_types = FALSE)
+my_universe <- background %>% pull(gene_name) %>% na.omit() %>% unique()
+
+cat("Background genes: ", length(my_universe), "\n", sep = "")
+for (s in names(gene_sets)) {
+  cat("  ", s, ": ", length(gene_sets[[s]]), " genes\n", sep = "")
+}
+
+
+# ---- 2. Run g:Profiler ----
+run_ora <- function(query_genes, set_name) {
+  
+  if (length(query_genes) == 0) {
+    message("No genes in the '", set_name, "' set - skipped.")
+    return(NULL)
+  }
+  
+  gost_results <- gost(
+    query             = query_genes,
+    organism          = "hsapiens",
+    ordered_query     = FALSE,
+    significant       = TRUE,
+    exclude_iea       = TRUE,
+    domain_scope      = "known",
+    numeric_ns        = "ENTREZGENE_ACC",
+    evcodes           = TRUE,
+    user_threshold    = padj_cutoff,
+    correction_method = "fdr",
+    custom_bg         = my_universe,
+    sources           = sources
+  )
+  
+  if (is.null(gost_results)) {
+    message("No significant enrichment for the '", set_name, "' set.")
+    return(NULL)
+  }
+  
+  clean_results <- as.data.frame(gost_results$result)
+  
+  # Flatten list-columns so the table can be written to CSV
+  clean_results[] <- lapply(clean_results, function(x) {
+    if (is.list(x)) sapply(x, paste, collapse = ", ") else x
+  })
+  
+  clean_results <- clean_results %>%
+    mutate(negative_log10_of_adjusted_p_value = -log10(p_value)) %>%
+    select(
+      significant, negative_log10_of_adjusted_p_value, p_value,
+      term_size, query_size, intersection_size, precision, recall,
+      term_id, source, term_name, effective_domain_size,
+      source_order, parents, intersection
+    ) %>%
+    arrange(p_value)
+  
+  out_file <- paste0("gProfiler_", set_name, ".csv")
+  write.csv(clean_results, out_file, row.names = FALSE)
+  cat("  ", set_name, ": ", nrow(clean_results), " enriched terms -> ", out_file, "\n", sep = "")
+  
+  invisible(clean_results)
+}
+
+cat("\nRunning g:Profiler (FDR <= ", padj_cutoff, ", exclude_iea = TRUE)\n", sep = "")
+results <- lapply(run_sets, function(s) run_ora(gene_sets[[s]], s))
+names(results) <- run_sets
+
+
+# ---- 3. Terms per source, per set ----
+for (s in run_sets) {
+  if (!is.null(results[[s]])) {
+    cat("\n", s, " - terms per source:\n", sep = "")
+    print(table(results[[s]]$source))
+  }
+}
