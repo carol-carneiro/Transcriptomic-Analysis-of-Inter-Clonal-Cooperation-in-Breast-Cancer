@@ -1,0 +1,1437 @@
+# =============================================================================
+# g:Profiler ORA POST-PROCESSING + ENRICHMENT BARPLOTS
+# =============================================================================
+#
+# Input:
+#   gProfiler_up.csv
+#   gProfiler_down.csv
+#   gProfiler_all.csv
+#   reactome hierachy.csv   
+#
+# Output:
+#   gProfiler_<set>_final.csv
+#
+#   gProfiler_<set>_BP_top.png
+#   gProfiler_<set>_GO_top.png
+#   gProfiler_<set>_Pathway.png
+#
+# Sets:
+#   up, down, all
+#
+# Manuscript Methods:
+#   "Gene ontology terms were hierarchically annotated and filtered to retain
+#    representative terms, then sorted based on semantic relevance to
+#    specifically identify those associated with cell migration, cell signalling
+#    and cancer related terms."
+#
+# =============================================================================
+
+
+# =============================================================================
+# 1. PACKAGES
+# =============================================================================
+
+library(dplyr)
+library(stringr)
+library(httr)
+library(jsonlite)
+library(ggplot2)
+library(forcats)
+library(tools)
+
+
+# =============================================================================
+# 2. CONFIGURATION
+# =============================================================================
+
+sets <- c("up", "down", "all")
+
+# Reactome hierarchy file
+# Set to NA if not available
+reactome_hierarchy_file <- "reactome hierachy.csv"
+
+
+# -----------------------------------------------------------------------------
+# Semantic relevance keywords
+# -----------------------------------------------------------------------------
+
+migration_keywords <-
+  "migration|motility|locomotion|chemotaxis|invasion|adhesion|focal adhesion|extracellular matrix|ECM|cytoskeleton|actin|protrusion|lamellipodium|filopodium|invadopodium"
+
+signal_keywords <-
+  "response to|signaling|signaling pathway|signal transduction|stimulus|cascade|growth factor|cytokine"
+
+cancer_signal_keywords <-
+  "estrogen|TGF|EGF|ERBB|MAPK|ERK|PI3K|AKT"
+
+unwanted_keywords <-
+  "growth|proliferation|DNA|RNA|cis-regulatory|development|histone|expression|differentiation|translation|metabolic|biosynthetic|nucleic|chromatin|promoter|methylated|ribosome|mitochond"
+
+
+# -----------------------------------------------------------------------------
+# KEGG categories of interest
+# -----------------------------------------------------------------------------
+
+selected_kegg <- c(
+  "Environmental Information Processing",
+  "Cellular Processes",
+  "Organismal Systems"
+)
+
+
+# -----------------------------------------------------------------------------
+# Plot settings
+# -----------------------------------------------------------------------------
+
+n_BP <- 30
+n_GO_MF <- 15
+n_GO_CC <- 15
+n_pathways <- 20
+
+bar_height <- 0.35
+plot_width <- 12
+
+
+# =============================================================================
+# 3. KEGG BRITE HIERARCHY
+# =============================================================================
+
+message("Fetching KEGG pathway hierarchy (br08901)...")
+
+kegg_lines <- readLines(
+  "https://rest.kegg.jp/get/br:br08901"
+)
+
+kegg_rows <- list()
+
+curr_A <- NA
+curr_B <- NA
+
+for (line in kegg_lines) {
+
+  prefix <- str_extract(line, "^[A-C]")
+
+  content <-
+    str_trim(
+      str_remove(line, "^[A-C]")
+    ) %>%
+    str_remove_all("<[^>]+>")
+
+  if (is.na(prefix)) next
+
+  if (prefix == "A") {
+
+    curr_A <- content
+
+  } else if (prefix == "B") {
+
+    curr_B <- content
+
+  } else if (prefix == "C") {
+
+    map_id <- str_extract(
+      content,
+      "[0-9]{5}"
+    )
+
+    if (!is.na(map_id)) {
+
+      kegg_rows[
+        [length(kegg_rows) + 1]
+      ] <- data.frame(
+        map_id = map_id,
+        category = curr_A,
+        subcategory = curr_B,
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+}
+
+kegg_hierarchy_db <-
+  bind_rows(kegg_rows) %>%
+  distinct(
+    map_id,
+    .keep_all = TRUE
+  )
+
+message(
+  "  KEGG pathways: ",
+  nrow(kegg_hierarchy_db)
+)
+
+
+# =============================================================================
+# 4. REACTOME PARENT-CHILD HIERARCHY
+# =============================================================================
+
+use_reactome <-
+  !is.na(reactome_hierarchy_file) &&
+  file.exists(reactome_hierarchy_file)
+
+
+if (use_reactome) {
+
+  reac_hierarchy <-
+    read.csv(
+      reactome_hierarchy_file,
+      stringsAsFactors = FALSE
+    ) %>%
+    filter(
+      !is.na(child_id),
+      child_id != ""
+    ) %>%
+    distinct(
+      child_id,
+      .keep_all = TRUE
+    )
+
+  message(
+    "  Reactome parent-child pairs: ",
+    nrow(reac_hierarchy)
+  )
+
+} else {
+
+  message(
+    "  Reactome hierarchy file not found - ",
+    "Reactome terms will be grouped by the g:Profiler ",
+    "`parents` column instead."
+  )
+}
+
+
+# =============================================================================
+# 5. REACTOME NAME CACHE
+# =============================================================================
+
+reac_name_cache <-
+  new.env(parent = emptyenv())
+
+
+get_reactome_name <- function(id) {
+
+  if (
+    is.na(id) ||
+    id == ""
+  ) {
+    return(NA_character_)
+  }
+
+  if (
+    !is.null(
+      reac_name_cache[[id]]
+    )
+  ) {
+    return(
+      reac_name_cache[[id]]
+    )
+  }
+
+  url <-
+    paste0(
+      "https://reactome.org/ContentService/data/pathway/",
+      id
+    )
+
+  res <-
+    try(
+      httr::GET(url),
+      silent = TRUE
+    )
+
+  nm <-
+    if (
+      inherits(res, "try-error") ||
+      status_code(res) != 200
+    ) {
+
+      id
+
+    } else {
+
+      d <-
+        fromJSON(
+          content(
+            res,
+            as = "text",
+            encoding = "UTF-8"
+          )
+        )
+
+      if (
+        is.null(d$displayName)
+      ) {
+        id
+      } else {
+        d$displayName
+      }
+    }
+
+  reac_name_cache[[id]] <- nm
+
+  nm
+}
+
+
+# =============================================================================
+# 6. PROCESS ONE g:Profiler RESULT TABLE
+# =============================================================================
+
+process_set <- function(set_name) {
+
+  in_file <-
+    paste0(
+      "gProfiler_",
+      set_name,
+      ".csv"
+    )
+
+  if (!file.exists(in_file)) {
+
+    message(
+      "Skipping '",
+      set_name,
+      "': ",
+      in_file,
+      " not found."
+    )
+
+    return(
+      invisible(NULL)
+    )
+  }
+
+
+  df_gp <-
+    read.csv(
+      in_file,
+      stringsAsFactors = FALSE
+    )
+
+
+  if (nrow(df_gp) == 0) {
+
+    message(
+      "Skipping '",
+      set_name,
+      "': no enriched terms."
+    )
+
+    return(
+      invisible(NULL)
+    )
+  }
+
+
+  # ===========================================================================
+  # 6A. SEMANTIC RELEVANCE CLASSIFICATION
+  # ===========================================================================
+
+  df <-
+    df_gp %>%
+
+    mutate(
+
+      negative_log10_of_adjusted_p_value =
+        as.numeric(
+          negative_log10_of_adjusted_p_value
+        ),
+
+      log_pval =
+        negative_log10_of_adjusted_p_value,
+
+      is_migration =
+        str_detect(
+          term_name,
+          regex(
+            migration_keywords,
+            ignore_case = TRUE
+          )
+        ),
+
+      is_signaling =
+        str_detect(
+          term_name,
+          regex(
+            signal_keywords,
+            ignore_case = TRUE
+          )
+        ),
+
+      is_cancer_signal =
+        str_detect(
+          term_name,
+          regex(
+            cancer_signal_keywords,
+            ignore_case = TRUE
+          )
+        )
+    ) %>%
+
+    mutate(
+
+      highlight =
+        case_when(
+
+          str_detect(
+            term_name,
+            regex(
+              unwanted_keywords,
+              ignore_case = TRUE
+            )
+          ) ~ NA,
+
+          if_any(
+            starts_with("is_"),
+            ~ .x
+          ) ~ TRUE,
+
+          TRUE ~ FALSE
+        )
+    ) %>%
+
+    filter(
+      !is.na(parents),
+      parents != ""
+    )
+
+
+  # ===========================================================================
+  # 6B. GO
+  # One representative term per source x parent group
+  # ===========================================================================
+
+  df_go <-
+    df %>%
+
+    filter(
+      str_starts(
+        source,
+        "GO"
+      )
+    ) %>%
+
+    group_by(
+      source,
+      parents
+    ) %>%
+
+    mutate(
+
+      representative =
+        negative_log10_of_adjusted_p_value ==
+        max(
+          negative_log10_of_adjusted_p_value,
+          na.rm = TRUE
+        )
+    ) %>%
+
+    ungroup() %>%
+
+    mutate(
+      category = NA_character_,
+      subcategory = NA_character_
+    )
+
+
+  # ===========================================================================
+  # 6C. REACTOME
+  # ===========================================================================
+
+  df_reac <-
+    df %>%
+    filter(
+      source == "REAC"
+    )
+
+
+  if (nrow(df_reac) > 0) {
+
+    if (use_reactome) {
+
+      df_reac <-
+        df_reac %>%
+
+        mutate(
+          join_id =
+            gsub(
+              "REAC:",
+              "",
+              term_id
+            )
+        ) %>%
+
+        left_join(
+          reac_hierarchy,
+          by = c(
+            "join_id" = "child_id"
+          )
+        ) %>%
+
+        mutate(
+          representative_id =
+            ifelse(
+              is.na(parent_id),
+              join_id,
+              parent_id
+            )
+        )
+
+
+      ids <-
+        unique(
+          df_reac$representative_id
+        )
+
+
+      message(
+        "  Naming ",
+        length(ids),
+        " Reactome parents..."
+      )
+
+
+      name_map <-
+        vapply(
+          ids,
+          get_reactome_name,
+          character(1)
+        )
+
+
+      df_reac <-
+        df_reac %>%
+
+        mutate(
+          category =
+            unname(
+              name_map[
+                representative_id
+              ]
+            )
+        ) %>%
+
+        select(
+          -join_id,
+          -parent_id,
+          -representative_id
+        )
+
+    } else {
+
+      df_reac <-
+        df_reac %>%
+        mutate(
+          category = parents
+        )
+    }
+
+
+    df_reac <-
+      df_reac %>%
+
+      group_by(
+        category
+      ) %>%
+
+      mutate(
+
+        representative =
+          !is.na(
+            negative_log10_of_adjusted_p_value
+          ) &
+
+          negative_log10_of_adjusted_p_value ==
+          max(
+            negative_log10_of_adjusted_p_value,
+            na.rm = TRUE
+          )
+      ) %>%
+
+      mutate(
+
+        representative =
+          ifelse(
+            representative &
+              row_number() == 1,
+            TRUE,
+            representative
+          )
+      ) %>%
+
+      ungroup() %>%
+
+      mutate(
+        subcategory = NA_character_
+      )
+  }
+
+
+  # ===========================================================================
+  # 6D. KEGG
+  # ===========================================================================
+
+  df_kegg <-
+    df %>%
+    filter(
+      source == "KEGG"
+    )
+
+
+  if (nrow(df_kegg) > 0) {
+
+    df_kegg <-
+      df_kegg %>%
+
+      mutate(
+        join_id =
+          str_extract(
+            term_id,
+            "[0-9]{5}"
+          )
+      ) %>%
+
+      left_join(
+        kegg_hierarchy_db,
+        by = c(
+          "join_id" = "map_id"
+        )
+      ) %>%
+
+      select(
+        -any_of("join_id")
+      ) %>%
+
+      mutate(
+        category =
+          ifelse(
+            is.na(category),
+            "Other/Unclassified",
+            category
+          )
+      )
+
+
+    in_scope <- function(
+      cat,
+      sub
+    ) {
+
+      cat %in% selected_kegg |
+
+        (
+          !is.na(sub) &
+          sub == "Cancer: overview"
+        )
+    }
+
+
+    df_kegg <-
+      df_kegg %>%
+
+      mutate(
+
+        group_var =
+          case_when(
+
+            in_scope(
+              category,
+              subcategory
+            ) &
+              !is.na(subcategory) &
+              subcategory != "" ~
+
+              subcategory,
+
+            in_scope(
+              category,
+              subcategory
+            ) ~
+
+              category,
+
+            TRUE ~
+
+              NA_character_
+          )
+      ) %>%
+
+      group_by(
+        group_var
+      ) %>%
+
+      mutate(
+
+        representative =
+          !is.na(group_var) &
+
+          !is.na(
+            negative_log10_of_adjusted_p_value
+          ) &
+
+          negative_log10_of_adjusted_p_value ==
+          max(
+            negative_log10_of_adjusted_p_value,
+            na.rm = TRUE
+          )
+      ) %>%
+
+      mutate(
+
+        representative =
+          ifelse(
+            representative &
+              row_number() == 1,
+            TRUE,
+            representative
+          )
+      ) %>%
+
+      ungroup() %>%
+
+      mutate(
+
+        representative =
+          ifelse(
+            in_scope(
+              category,
+              subcategory
+            ),
+            representative,
+            NA
+          )
+      ) %>%
+
+      select(
+        -group_var
+      )
+  }
+
+
+  # ===========================================================================
+  # 6E. MERGE AND SORT
+  # ===========================================================================
+
+  df_final <-
+    bind_rows(
+      df_go,
+      df_reac,
+      df_kegg
+    ) %>%
+
+    arrange(
+
+      source,
+
+      is.na(
+        representative
+      ),
+
+      desc(
+        coalesce(
+          as.logical(highlight),
+          FALSE
+        )
+      ),
+
+      desc(
+        coalesce(
+          as.logical(representative),
+          FALSE
+        )
+      ),
+
+      desc(
+        as.numeric(
+          negative_log10_of_adjusted_p_value
+        )
+      )
+    )
+
+
+  # ===========================================================================
+  # 6F. SAVE FINAL CSV
+  # ===========================================================================
+
+  out_file <-
+    paste0(
+      "gProfiler_",
+      set_name,
+      "_final.csv"
+    )
+
+
+  write.csv(
+    df_final,
+    out_file,
+    row.names = FALSE
+  )
+
+
+  cat(
+    "\n",
+    set_name,
+    ": ",
+    nrow(df_gp),
+    " terms -> ",
+    nrow(df_final),
+    " after parent grouping -> ",
+    out_file,
+    "\n",
+    sep = ""
+  )
+
+
+  cat(
+    "   highlighted: ",
+    sum(
+      df_final$highlight %in% TRUE,
+      na.rm = TRUE
+    ),
+
+    " | representative: ",
+
+    sum(
+      df_final$representative %in% TRUE,
+      na.rm = TRUE
+    ),
+
+    " | out of scope: ",
+
+    sum(
+      is.na(
+        df_final$representative
+      )
+    ),
+
+    "\n",
+    sep = ""
+  )
+
+
+  print(
+    table(
+      df_final$source
+    )
+  )
+
+
+  return(
+    df_final
+  )
+}
+
+
+# =============================================================================
+# 7. RUN POST-PROCESSING
+# =============================================================================
+
+processed <-
+  lapply(
+    sets,
+    process_set
+  )
+
+names(processed) <- sets
+
+
+# =============================================================================
+# 8. LABEL CLEANER FOR PLOTS
+# =============================================================================
+
+clean_labels <- function(x) {
+
+  x <-
+    gsub(
+      "_[0-9]+$",
+      "",
+      x
+    )
+
+  str_wrap(
+    x,
+    width = 80
+  )
+}
+
+
+# =============================================================================
+# 9. ORDER TERMS FOR PLOTS
+# =============================================================================
+
+apply_grouped_order <- function(df) {
+
+  df %>%
+
+    arrange(
+      source,
+      log_pval
+    ) %>%
+
+    mutate(
+
+      term_id =
+        paste0(
+          term_name,
+          "_",
+          row_number()
+        ),
+
+      term_ordered =
+        factor(
+          term_id,
+          levels = rev(term_id)
+        )
+    )
+}
+
+
+# =============================================================================
+# 10. GENERATE PLOTS
+# =============================================================================
+
+make_plots <- function(set_name) {
+
+
+  input_file <-
+    paste0(
+      "gProfiler_",
+      set_name,
+      "_final.csv"
+    )
+
+
+  if (!file.exists(input_file)) {
+
+    message(
+      "Skipping plots for ",
+      set_name,
+      ": ",
+      input_file,
+      " not found."
+    )
+
+    return(
+      invisible(NULL)
+    )
+  }
+
+
+  message(
+    "\nGenerating plots for: ",
+    set_name
+  )
+
+
+  gprof_sorted <-
+    read.csv(
+      input_file,
+      stringsAsFactors = FALSE
+    )
+
+
+  # ---------------------------------------------------------------------------
+  # Ensure log_pval exists
+  # ---------------------------------------------------------------------------
+
+  if (
+    !"log_pval" %in%
+    names(gprof_sorted)
+  ) {
+
+    gprof_sorted$log_pval <-
+      as.numeric(
+        gprof_sorted[
+          "negative_log10_of_adjusted_p_value"
+        ]
+      )
+  }
+
+
+  # ---------------------------------------------------------------------------
+  # Remove duplicate terms
+  # ---------------------------------------------------------------------------
+
+  gprof_sorted <-
+    gprof_sorted %>%
+
+    distinct(
+      source,
+      term_name,
+      .keep_all = TRUE
+    )
+
+
+  # ===========================================================================
+  # GO: BP + MF + CC
+  # ===========================================================================
+
+  df_go <-
+    gprof_sorted %>%
+
+    filter(
+      source %in%
+        c(
+          "GO:BP",
+          "GO:MF",
+          "GO:CC"
+        )
+    ) %>%
+
+    group_by(
+      source
+    ) %>%
+
+    group_modify(
+      ~ {
+
+        n <-
+          switch(
+            .y$source,
+
+            "GO:BP" = n_BP,
+
+            "GO:MF" = n_GO_MF,
+
+            "GO:CC" = n_GO_CC
+          )
+
+        head(
+          .x,
+          n
+        )
+      }
+    ) %>%
+
+    ungroup() %>%
+
+    apply_grouped_order()
+
+
+  # ===========================================================================
+  # GO: BP ONLY
+  # ===========================================================================
+
+  df_bp <-
+    gprof_sorted %>%
+
+    filter(
+      source == "GO:BP"
+    ) %>%
+
+    slice_head(
+      n = n_BP
+    ) %>%
+
+    mutate(
+
+      term_id =
+        paste0(
+          term_name,
+          "_",
+          row_number()
+        ),
+
+      term_ordered =
+        fct_reorder(
+          term_id,
+          log_pval
+        )
+    )
+
+
+  # ===========================================================================
+  # KEGG + REACTOME
+  # ===========================================================================
+
+  df_pathways <-
+    gprof_sorted %>%
+
+    filter(
+      source %in%
+        c(
+          "KEGG",
+          "REAC"
+        )
+    ) %>%
+
+    group_by(
+      source
+    ) %>%
+
+    slice_head(
+      n = n_pathways
+    ) %>%
+
+    ungroup() %>%
+
+    apply_grouped_order()
+
+
+  # ===========================================================================
+  # GO PLOT
+  # ===========================================================================
+
+  if (
+    nrow(df_go) > 0
+  ) {
+
+    plot_go <-
+      ggplot(
+        df_go,
+        aes(
+          x = term_ordered,
+          y = log_pval,
+          fill = source
+        )
+      ) +
+
+      geom_col(
+        width = 0.7
+      ) +
+
+      coord_flip() +
+
+      scale_x_discrete(
+        labels = clean_labels
+      ) +
+
+      labs(
+
+        title =
+          paste0(
+            "GO enrichment - ",
+            toupper(set_name),
+            " regulated genes"
+          ),
+
+        x = "GO term",
+
+        y =
+          "-log10(adjusted p-value)",
+
+        fill = "Source"
+      ) +
+
+      scale_fill_manual(
+        values =
+          c(
+            "GO:BP" = "orange",
+            "GO:MF" = "pink",
+            "GO:CC" = "yellow"
+          )
+      ) +
+
+      theme_minimal(
+        base_size = 14
+      ) +
+
+      theme(
+
+        plot.title =
+          element_text(
+            face = "bold"
+          ),
+
+        axis.text.y =
+          element_text(
+            size = 10
+          ),
+
+        legend.position =
+          "right"
+      )
+
+
+    ggsave(
+
+      paste0(
+        "gProfiler_",
+        set_name,
+        "_GO_top.png"
+      ),
+
+      plot_go,
+
+      width =
+        plot_width,
+
+      height =
+        max(
+          5,
+          nrow(df_go) *
+            bar_height
+        ),
+
+      units = "in",
+
+      dpi = 300
+    )
+  }
+
+
+  # ===========================================================================
+  # BP PLOT
+  # ===========================================================================
+
+  if (
+    nrow(df_bp) > 0
+  ) {
+
+    plot_bp <-
+      ggplot(
+        df_bp,
+        aes(
+          x = term_ordered,
+          y = log_pval,
+          fill = source
+        )
+      ) +
+
+      geom_col(
+        width = 0.7
+      ) +
+
+      coord_flip() +
+
+      scale_x_discrete(
+        labels = clean_labels
+      ) +
+
+      labs(
+
+        title =
+          paste0(
+            "Biological Process enrichment - ",
+            toupper(set_name),
+            " regulated genes"
+          ),
+
+        x =
+          "GO biological process",
+
+        y =
+          "-log10(adjusted p-value)"
+      ) +
+
+      scale_fill_manual(
+        values =
+          c(
+            "GO:BP" = "orange"
+          )
+      ) +
+
+      theme_minimal(
+        base_size = 14
+      ) +
+
+      theme(
+
+        plot.title =
+          element_text(
+            face = "bold"
+          ),
+
+        axis.text.y =
+          element_text(
+            size = 10
+          ),
+
+        legend.position =
+          "none"
+      )
+
+
+    ggsave(
+
+      paste0(
+        "gProfiler_",
+        set_name,
+        "_BP_top.png"
+      ),
+
+      plot_bp,
+
+      width =
+        plot_width,
+
+      height =
+        max(
+          5,
+          nrow(df_bp) *
+            bar_height
+        ),
+
+      units = "in",
+
+      dpi = 300
+    )
+  }
+
+
+  # ===========================================================================
+  # PATHWAY PLOT: KEGG + REACTOME
+  # ===========================================================================
+
+  if (
+    nrow(df_pathways) > 0
+  ) {
+
+    plot_path <-
+      ggplot(
+        df_pathways,
+        aes(
+          x = term_ordered,
+          y = log_pval,
+          fill = source
+        )
+      ) +
+
+      geom_col(
+        width = 0.7
+      ) +
+
+      coord_flip() +
+
+      scale_x_discrete(
+        labels = clean_labels
+      ) +
+
+      labs(
+
+        title =
+          paste0(
+            "Pathway enrichment - ",
+            toupper(set_name),
+            " regulated genes"
+          ),
+
+        x =
+          "Pathway",
+
+        y =
+          "-log10(adjusted p-value)",
+
+        fill =
+          "Source"
+      ) +
+
+      scale_fill_manual(
+        values =
+          c(
+            "KEGG" = "lightblue",
+            "REAC" = "lightgreen"
+          )
+      ) +
+
+      theme_minimal(
+        base_size = 14
+      ) +
+
+      theme(
+
+        plot.title =
+          element_text(
+            face = "bold"
+          ),
+
+        axis.text.y =
+          element_text(
+            size = 10
+          ),
+
+        legend.position =
+          "right"
+      )
+
+
+    ggsave(
+
+      paste0(
+        "gProfiler_",
+        set_name,
+        "_Pathway.png"
+      ),
+
+      plot_path,
+
+      width =
+        plot_width,
+
+      height =
+        max(
+          5,
+          nrow(df_pathways) *
+            bar_height
+        ),
+
+      units = "in",
+
+      dpi = 300
+    )
+  }
+
+
+  message(
+    "  GO terms: ",
+    nrow(df_go),
+    " | BP: ",
+    nrow(df_bp),
+    " | pathways: ",
+    nrow(df_pathways)
+  )
+
+
+  invisible(
+    list(
+      GO = df_go,
+      BP = df_bp,
+      pathways = df_pathways
+    )
+  )
+}
+
+
+# =============================================================================
+# 11. GENERATE PLOTS FOR ALL THREE SETS
+# =============================================================================
+
+plots <-
+  lapply(
+    sets,
+    make_plots
+  )
+
+names(plots) <-
+  sets
+
+
+# =============================================================================
+# 12. FINISHED
+# =============================================================================
+
+message("")
+message("============================================================")
+message("g:Profiler ORA post-processing and plotting completed.")
+message("============================================================")
+message("")
+message("Generated files:")
+message("")
+message("  gProfiler_up_final.csv")
+message("  gProfiler_down_final.csv")
+message("  gProfiler_all_final.csv")
+message("")
+message("  gProfiler_up_BP_top.png")
+message("  gProfiler_up_GO_top.png")
+message("  gProfiler_up_Pathway.png")
+message("")
+message("  gProfiler_down_BP_top.png")
+message("  gProfiler_down_GO_top.png")
+message("  gProfiler_down_Pathway.png")
+message("")
+message("  gProfiler_all_BP_top.png")
+message("  gProfiler_all_GO_top.png")
+message("  gProfiler_all_Pathway.png")
+message("")
+message("============================================================")
