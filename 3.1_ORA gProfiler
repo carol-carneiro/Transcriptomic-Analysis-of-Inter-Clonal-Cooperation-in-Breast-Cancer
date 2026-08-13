@@ -11,7 +11,7 @@ library(readr)
 library(dplyr)
 
 # ---- CONFIG ----
-deg_file        <- "DCvsCC_deg.csv"   # e.g. DCvsCC_deg.csv or CCMvsCC_deg.csv
+deg_file        <- "DCvsCC_deg.csv"   # e.g. CCMvsCC_deg.csv or CCMvsCC_deg.csv
 background_file <- "background.csv"
 
 lfc_cutoff  <- 1
