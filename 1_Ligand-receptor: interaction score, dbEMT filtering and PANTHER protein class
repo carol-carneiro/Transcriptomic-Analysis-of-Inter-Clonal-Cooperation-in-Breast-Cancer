@@ -1,0 +1,246 @@
+# -----------------------------------------------------------------------------
+# Ligand-receptor: interaction score, dbEMT filtering and PANTHER protein class
+#
+# Manuscript section : Methods - Ligand-Receptor interactions.
+#   "For each L-R pair, an interaction score was calculated as the product of
+#    ligand and receptor from the mean of FPKM (FPKMligand X FPKMreceptor).
+#    Epithelial-mesenchymal transition (EMT) ligands and receptors were filtered
+#    using the dbEMT database. Protein class annotation was applied to receptors
+#    using PANTHER database and unique ligands were then quantified for each
+#    protein class."
+#
+# Input  : LR_DEG.csv        L-R pairs with mean FPKM per side and DEG stats
+#          dbEMT.csv         dbEMT gene list (GeneSymbol)
+#          PANTHER_LIST.csv  PANTHER export (Mapped ID, PANTHER Protein Class)
+#
+# Output : LR_scored.csv           all pairs with the interaction score
+#          LR_EMT only.csv         dbEMT-filtered pairs -> feeds 01_lr_interaction_scatter.R
+#          LR classification.csv   receptor, partner ligands, PANTHER class
+#          LR_receptor_degree.csv  partner-ligand count per receptor
+#          LR_protein_class.png    unique ligands per PANTHER protein class
+#          LR_hub_receptors.png    top receptors by partner-ligand count
+#
+# Replaces two earlier scripts:
+#   Protein class LR.R           read a pre-made LR classification.csv
+#   top receptors with ligands.R had the ligand counts typed in by hand
+# -----------------------------------------------------------------------------
+
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(readr)
+library(ggplot2)
+
+
+# =============================================================================
+# CONFIG
+# =============================================================================
+
+lr_file      <- "LR_DEG.csv"
+dbemt_file   <- "dbEMT.csv"
+panther_file <- "PANTHER_LIST.csv"
+
+# Columns in lr_file
+col_ligand        <- "Ligand - MDA"
+col_receptor      <- "Receptor - MCF7"
+col_ligand_fpkm   <- "MDA-FPKM"
+col_receptor_fpkm <- "MCF7-FPKM"
+col_ligand_lfc    <- "MDA-log2FC"
+col_ligand_padj   <- "MDA-padj"
+
+dbemt_symbol_col  <- "GeneSymbol"
+panther_gene_col  <- "Mapped ID"
+panther_class_col <- "PANTHER Protein Class"
+
+min_ligands_per_class <- 2    # protein classes with fewer ligands are dropped
+n_hub_receptors       <- 20   # receptors shown in the hub plot
+
+
+# =============================================================================
+# 1. LOAD
+# =============================================================================
+
+lr_raw <- read_csv(lr_file, show_col_types = FALSE)
+
+needed  <- c(col_ligand, col_receptor, col_ligand_fpkm, col_receptor_fpkm)
+missing <- setdiff(needed, colnames(lr_raw))
+if (length(missing) > 0) {
+  stop("These columns are not in ", lr_file, ": ", paste(missing, collapse = ", "),
+       "\nAvailable columns: ", paste(colnames(lr_raw), collapse = ", "))
+}
+
+lr <- lr_raw %>%
+  transmute(
+    ligand        = str_trim(as.character(.data[[col_ligand]])),
+    receptor      = str_trim(as.character(.data[[col_receptor]])),
+    ligand_fpkm   = as.numeric(.data[[col_ligand_fpkm]]),
+    receptor_fpkm = as.numeric(.data[[col_receptor_fpkm]]),
+    ligand_log2FC = if (col_ligand_lfc  %in% colnames(lr_raw))
+                      as.numeric(.data[[col_ligand_lfc]])  else NA_real_,
+    ligand_padj   = if (col_ligand_padj %in% colnames(lr_raw))
+                      as.numeric(.data[[col_ligand_padj]]) else NA_real_
+  ) %>%
+  filter(!is.na(ligand), !is.na(receptor), ligand != "", receptor != "") %>%
+  distinct(ligand, receptor, .keep_all = TRUE)
+
+cat("L-R pairs: ", nrow(lr),
+    " | ligands: ", n_distinct(lr$ligand),
+    " | receptors: ", n_distinct(lr$receptor), "\n", sep = "")
+
+
+# =============================================================================
+# 2. INTERACTION SCORE  =  FPKM(ligand) x FPKM(receptor)
+# =============================================================================
+
+lr_scored <- lr %>%
+  mutate(
+    `ligand-receptor`    = paste0(ligand, "-", receptor),
+    `Ligand MDA  FPKM`   = ligand_fpkm,     # two spaces: read back by script 01
+    `Receptor MCF7 FPKM` = receptor_fpkm,
+    `Interaction Score`  = ligand_fpkm * receptor_fpkm
+  ) %>%
+  arrange(desc(`Interaction Score`))
+
+write_csv(lr_scored, "LR_scored.csv")
+
+
+# =============================================================================
+# 3. dbEMT FILTERING  ->  "LR_EMT only.csv"
+# =============================================================================
+# A pair is kept when the ligand OR the receptor is listed in dbEMT.
+
+dbemt <- read_csv(dbemt_file, show_col_types = FALSE)
+if (!dbemt_symbol_col %in% colnames(dbemt)) {
+  stop("Column '", dbemt_symbol_col, "' not found in ", dbemt_file,
+       ". Available: ", paste(colnames(dbemt), collapse = ", "))
+}
+
+emt_genes <- dbemt %>%
+  pull(!!dbemt_symbol_col) %>%
+  as.character() %>% str_trim() %>% toupper() %>% unique()
+
+lr_emt <- lr_scored %>%
+  mutate(
+    ligand_in_EMT   = toupper(ligand)   %in% emt_genes,
+    receptor_in_EMT = toupper(receptor) %in% emt_genes
+  ) %>%
+  filter(ligand_in_EMT | receptor_in_EMT)
+
+cat("dbEMT genes: ", length(emt_genes),
+    " | EMT-related pairs: ", nrow(lr_emt), " of ", nrow(lr_scored), "\n", sep = "")
+
+write_csv(lr_emt, "LR_EMT only.csv")
+
+
+# =============================================================================
+# 4. RECEPTOR SUMMARY + PANTHER CLASS  ->  "LR classification.csv"
+# =============================================================================
+
+panther <- read_csv(panther_file, show_col_types = FALSE)
+if (!all(c(panther_gene_col, panther_class_col) %in% colnames(panther))) {
+  stop("Set panther_gene_col / panther_class_col. Available in ", panther_file,
+       ": ", paste(colnames(panther), collapse = ", "))
+}
+
+panther_map <- panther %>%
+  transmute(
+    receptor_up = toupper(str_trim(as.character(.data[[panther_gene_col]]))),
+    PANTHER.Protein.Class = str_trim(as.character(.data[[panther_class_col]]))
+  ) %>%
+  filter(!is.na(PANTHER.Protein.Class), PANTHER.Protein.Class != "") %>%
+  distinct(receptor_up, .keep_all = TRUE)
+
+lr_classification <- lr_scored %>%
+  group_by(receptor) %>%
+  summarise(
+    Ligands   = paste(sort(unique(ligand)), collapse = ","),
+    N_Ligands = n_distinct(ligand),
+    .groups   = "drop"
+  ) %>%
+  mutate(receptor_up = toupper(receptor)) %>%
+  left_join(panther_map, by = "receptor_up") %>%
+  select(-receptor_up) %>%
+  arrange(desc(N_Ligands))
+
+n_named <- sum(!is.na(lr_classification$PANTHER.Protein.Class))
+cat("Receptors with a PANTHER class: ", n_named, " of ",
+    nrow(lr_classification), "\n", sep = "")
+
+unclassified <- lr_classification %>%
+  filter(is.na(PANTHER.Protein.Class)) %>%
+  pull(receptor)
+if (length(unclassified) > 0) {
+  message("No PANTHER class for ", length(unclassified), " receptor(s): ",
+          paste(sort(unclassified), collapse = ", "),
+          "\n  Their ligands are excluded from the protein-class plot. ",
+          "Re-run these through PANTHER and add them to ", panther_file,
+          " to include them.")
+}
+
+write_csv(lr_classification, "LR classification.csv")
+
+# List for re-submission to pantherdb.org, so the gap can be closed
+if (length(unclassified) > 0) {
+  write_lines(sort(unclassified), "receptors_missing_panther_class.txt")
+}
+
+
+# =============================================================================
+# 5. PLOT - unique ligands per PANTHER protein class
+# =============================================================================
+# A receptor may carry several classes separated by ";"; each is counted.
+
+df_long <- lr_classification %>%
+  filter(!is.na(Ligands), Ligands != "",
+         !is.na(PANTHER.Protein.Class), PANTHER.Protein.Class != "") %>%
+  separate_rows(PANTHER.Protein.Class, sep = ";") %>%
+  mutate(PANTHER.Protein.Class = str_trim(PANTHER.Protein.Class)) %>%
+  filter(PANTHER.Protein.Class != "") %>%
+  separate_rows(Ligands, sep = ",") %>%
+  mutate(Ligands = str_trim(Ligands))
+
+unique_ligand_class <- df_long %>%
+  group_by(PANTHER.Protein.Class) %>%
+  summarise(Unique_Ligands = n_distinct(Ligands), .groups = "drop") %>%
+  filter(Unique_Ligands >= min_ligands_per_class) %>%
+  arrange(desc(Unique_Ligands))
+
+print(unique_ligand_class)
+
+p_class <- ggplot(unique_ligand_class,
+                  aes(x = reorder(PANTHER.Protein.Class, Unique_Ligands),
+                      y = Unique_Ligands)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(x = "Protein Class",
+       y = "Number of Unique Ligands") +
+  theme_minimal()
+
+ggsave("LR_protein_class.png", p_class,
+       width  = 10,
+       height = max(4, nrow(unique_ligand_class) * 0.32),
+       dpi    = 300)
+
+
+# =============================================================================
+# 6. PLOT - hub receptors by number of partner ligands
+# =============================================================================
+# Counted from the L-R table rather than typed in by hand.
+
+hub_genes <- lr_classification %>%
+  select(Gene_Symbol = receptor, Degree = N_Ligands) %>%
+  arrange(desc(Degree))
+
+write_csv(hub_genes, "LR_receptor_degree.csv")
+
+p_hub <- ggplot(head(hub_genes, n_hub_receptors),
+                aes(x = reorder(Gene_Symbol, Degree), y = Degree)) +
+  geom_bar(stat = "identity", fill = "grey") +
+  coord_flip() +
+  labs(title = "", x = "Receptor", y = "Number of Ligand") +
+  theme_minimal()
+
+ggsave("LR_hub_receptors.png", p_hub, width = 8, height = 6, dpi = 300)
+
+cat("\nTop receptors by partner-ligand count:\n")
+print(head(hub_genes, n_hub_receptors))
