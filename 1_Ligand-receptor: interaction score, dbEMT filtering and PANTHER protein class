@@ -7,7 +7,7 @@
 #    Epithelial-mesenchymal transition (EMT) ligands and receptors were filtered
 #    using the dbEMT database. Protein class annotation was applied to receptors
 #    using PANTHER database and unique ligands were then quantified for each
-#    protein class."
+#    protein class"
 #
 # Input  : LR_DEG.csv        L-R pairs with mean FPKM per side and DEG stats
 #          dbEMT.csv         dbEMT gene list (GeneSymbol)
