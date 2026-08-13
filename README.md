@@ -5,11 +5,10 @@ This repository contains the R code used for the transcriptomic analyses in the 
 
 The code covers:
 
-1. Global expression profiling (Venn diagrams, PCA, volcano plots) of DESeq2 output
-2. Ligand–receptor (L–R) interaction analysis of TALKIEN output
-3. Over-representation analysis (ORA) with g:Profiler, including hierarchical annotation and representative-term selection for GO, KEGG and Reactome
-4. Gene Set Enrichment Analysis (GSEA) — ranked-list generation and result visualization
-5. Gene Set Variation Analysis (GSVA) and EMT scoring
+Global expression profiling (Venn diagrams, PCA, volcano plots) of DESeq2 output
+Ligand–receptor (L–R) interaction analysis of TALKIEN output
+Over-representation analysis (ORA) with g:Profiler, including hierarchical annotation and representative-term selection for GO, KEGG and Reactome
+Gene Set Variation Analysis (GSVA) and EMT scoring
 
 
 **Raw RNA-seq data:** NCBI BioProject **PRJNA1473975**
