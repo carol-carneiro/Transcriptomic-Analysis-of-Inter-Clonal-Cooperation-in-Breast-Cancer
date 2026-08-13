@@ -1,0 +1,86 @@
+# -----------------------------------------------------------------------------
+# Expressed genes shared between MCF7, MDA and MCF7 + CM (Venn)
+#
+# Manuscript section : Methods - Gene Quantification and Differential Expression;
+#                      genes with FPKM >= 0.1 were considered expressed
+# Input              : gene_fpkm_group.csv
+# Output             : Venn_MCF7_MDA_MCF7_CM.png
+#                      genes_MDA_and_MCF7_CM_only_with_expression.csv
+# -----------------------------------------------------------------------------
+
+library(VennDiagram)
+library(readr)
+library(grid)
+
+# Fill colour per condition, matching 01_venn_expressed_genes.R so a given
+# group is the same colour in every figure.
+group_fill <- c(
+  "MDA"       = "#4EC1C4",   # teal
+  "MCF7 + CM" = "#FF6B6B",   # pink
+  "MCF7"      = "#F0E442"    # yellow
+)
+
+# Read original data (ensure both gene_id and gene_name exist in the file)
+gene_data_original <- read_csv("gene_fpkm_group.csv")
+
+# 1. Keep required columns for Venn logic
+gene_data <- gene_data_original[, c("gene_id", "CC", "DC", "CCM")]
+gene_data <- na.omit(gene_data)
+
+# Expression threshold >= 0.1
+genes_MCF7    <- unique(gene_data$gene_id[gene_data$CC  >= 0.1])
+genes_MDA     <- unique(gene_data$gene_id[gene_data$DC  >= 0.1])
+genes_MCF7_CM <- unique(gene_data$gene_id[gene_data$CCM >= 0.1])
+
+# Print counts
+cat("MCF7 >= 0.1:", length(genes_MCF7), "\n")
+cat("MDA >= 0.1:", length(genes_MDA), "\n")
+cat("MCF7 + CM >= 0.1:", length(genes_MCF7_CM), "\n")
+
+# Create Venn plot object
+venn.plot <- venn.diagram(
+  # venn.diagram places the sets top-left, top-right, then bottom.
+  # This order reproduces the published figure: MDA top-left, MCF7 + CM
+  # top-right, MCF7 bottom.
+  x = list(
+    "MDA" = genes_MDA,
+    "MCF7 + CM" = genes_MCF7_CM,
+    "MCF7" = genes_MCF7
+  ),
+  filename = NULL,
+  height = 3200,
+  width = 3200,
+  resolution = 400,
+  col = "black",
+  # Order must follow the `x = list(...)` order above: MDA, MCF7 + CM, MCF7
+  fill = unname(group_fill[c("MDA", "MCF7 + CM", "MCF7")]),
+  alpha = 0.5,
+  cex = 1.2,
+  cat.cex = 1.5,
+  cat.fontface = "bold",
+  fontfamily = "sans",
+  margin = 0.1,
+  main = "",
+  main.cex = 2
+)
+
+# Save high-resolution figure
+png("Venn_MCF7_MDA_MCF7_CM.png", width = 3500, height = 3200, res = 400)
+grid.draw(venn.plot)
+dev.off()
+
+
+# --- EXTRACTION STEP ---
+
+# Find target gene_ids shared by MDA and MCF7+CM, but NOT MCF7
+shared_mda_cm   <- intersect(genes_MDA, genes_MCF7_CM)
+target_gene_ids <- setdiff(shared_mda_cm, genes_MCF7)
+
+cat("Number of genes unique to MDA & MCF7+CM:", length(target_gene_ids), "\n")
+
+# Filter original data to extract: ID, Name, DC expression, and CCM expression
+target_genes_df <- gene_data_original[gene_data_original$gene_id %in% target_gene_ids,
+                                      c("gene_id", "gene_name", "DC", "CCM")]
+target_genes_df <- unique(target_genes_df)
+
+write_csv(target_genes_df, "genes_MDA_and_MCF7_CM_only_with_expression.csv")
