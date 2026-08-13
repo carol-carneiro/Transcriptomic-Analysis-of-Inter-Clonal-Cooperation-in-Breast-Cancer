@@ -1,19 +1,30 @@
+# -----------------------------------------------------------------------------
+# Volcano plot of a DESeq2 contrast
+#
+# Manuscript section : Methods - Gene Quantification and Differential Expression - adjusted p <= 0.05 and |log2FC| > 1
+# Input              : a DESeq2 result table (set `deg_file` below)
+# Output             : VolcanoPlot_<contrast>.png
+# -----------------------------------------------------------------------------
+
 library(readr)
 library(ggplot2)
 library(dplyr)
 library(ggrepel)
 
 
-data_path <- "C:/Users/carol/OneDrive - University of New Brunswick/Transcriptomics/Filtered Data/New Analysis/48h/1.deglist/Manuscripts/Manuscript 3/DEGs"
+data_path <- "data"   # set to the folder holding the DESeq2 result tables
 
 # 1. Read DESeq2 results
-deg_data <- read_csv(file.path(data_path,"CCMEvsCCM_deg.csv"))
+#    Set `deg_file` to the contrast you want to plot, e.g.
+#      "CCMvsCC_deg.csv" - MCF7 + CM vs naive MCF7
+#      "DCvsCC_deg.csv"  - MDA vs MCF7
+deg_file <- "CCMvsCC_deg.csv"
+deg_data <- read_csv((deg_file))
 
 # 2. Thresholds
 log2fc_cutoff <- 1
 padj_cutoff <- 0.05
 
-# 3. Clean data and classify genes
 # 3. Clean data and classify genes
 deg_data <- deg_data %>%
   filter(!is.na(padj),
@@ -150,7 +161,7 @@ volcano_plot <- ggplot(
 
 # 8. Save figure
 ggsave(
-  "VolcanoPlot_CCME.png",
+  paste0("VolcanoPlot_", tools::file_path_sans_ext(deg_file), ".png"),
   plot = volcano_plot,
   width = 6,
   height = 6,
