@@ -1,0 +1,138 @@
+# -----------------------------------------------------------------------------
+# Expressed genes shared between two conditions (Venn)
+#
+# Manuscript section : Methods - Gene Quantification and Differential Expression;
+#                      genes with FPKM >= 0.1 were considered expressed
+# Input              : gene_fpkm_group.csv
+# Output             : Venn_Diagram_<A>_<B>.png
+#                      common_genes_<A>_<B>.csv
+#                      unique_genes_<A>_not_<B>.csv, unique_genes_<B>_not_<A>.csv
+#                      gene_analysis_summary_<A>_<B>.csv
+#                      ...written once per comparison run at the bottom
+#
+# Group columns in gene_fpkm_group.csv:
+#   CC  = MCF7 (naive)
+#   CCM = MCF7 + MDA conditioned medium
+#   DC  = MDA-MB-231
+# -----------------------------------------------------------------------------
+
+library(VennDiagram)
+library(readr)
+
+fpkm_threshold <- 0.1
+
+# Read the file containing all the columns
+g_data <- read_csv("gene_fpkm_group.csv")
+
+
+# -----------------------------------------------------------------------------
+# Compare the expressed-gene sets of two groups
+# -----------------------------------------------------------------------------
+venn_expressed <- function(data,
+                           col_a, label_a, fill_a,
+                           col_b, label_b, fill_b,
+                           threshold = fpkm_threshold) {
+  
+  # File-safe versions of the labels (e.g. "MCF7 + CM" -> "MCF7_CM")
+  tag_a <- gsub("[^A-Za-z0-9]+", "_", label_a)
+  tag_b <- gsub("[^A-Za-z0-9]+", "_", label_b)
+  pair  <- paste0(tag_a, "_", tag_b)
+  
+  # Remove rows with NA in the relevant columns
+  d <- na.omit(as.data.frame(data)[, c("gene_id", col_a, col_b)])
+  
+  # Genes considered expressed in each group
+  genes_a <- unique(d$gene_id[d[[col_a]] >= threshold])
+  genes_b <- unique(d$gene_id[d[[col_b]] >= threshold])
+  
+  # Intersection and unique sets
+  common_genes <- intersect(genes_a, genes_b)
+  unique_a <- setdiff(genes_a, genes_b)
+  unique_b <- setdiff(genes_b, genes_a)
+  
+  # Save the three primary gene lists.
+  # The "unique" filenames carry both group tags, because a set unique to MCF7
+  # relative to MDA is not the same set as one unique to MCF7 relative to
+  # MCF7 + CM. Naming them after one group alone would overwrite.
+  write.csv(data.frame(Common_Genes = common_genes),
+            paste0("common_genes_", pair, ".csv"), row.names = FALSE)
+  write.csv(data.frame(Unique_Genes = unique_a),
+            paste0("unique_genes_", tag_a, "_not_", tag_b, ".csv"), row.names = FALSE)
+  write.csv(data.frame(Unique_Genes = unique_b),
+            paste0("unique_genes_", tag_b, "_not_", tag_a, ".csv"), row.names = FALSE)
+  
+  # Summary statistics table
+  summary_matrix <- data.frame(
+    Metric_Gene_Set = c(
+      "Intersection (Common Genes)",
+      paste0("Unique to ", label_a, " Only"),
+      paste0("Unique to ", label_b, " Only"),
+      paste0("Total Genes with ", col_a, " >= ", threshold, " (", label_a, ")"),
+      paste0("Total Genes with ", col_b, " >= ", threshold, " (", label_b, ")")
+    ),
+    Plot_Group_Label = c("Overlap",
+                         paste(label_a, "Only"), paste(label_b, "Only"),
+                         paste(label_a, "Total"), paste(label_b, "Total")),
+    Threshold_Condition = c(
+      paste0(col_a, " >= ", threshold, " & ", col_b, " >= ", threshold),
+      paste0(col_a, " >= ", threshold, " & ", col_b, " < ",  threshold),
+      paste0(col_b, " >= ", threshold, " & ", col_a, " < ",  threshold),
+      paste0(col_a, " >= ", threshold),
+      paste0(col_b, " >= ", threshold)
+    ),
+    Gene_Count = c(
+      length(common_genes),
+      length(unique_a),
+      length(unique_b),
+      length(genes_a),
+      length(genes_b)
+    )
+  )
+  
+  summary_file <- paste0("gene_analysis_summary_", pair, ".csv")
+  write.csv(summary_matrix, summary_file, row.names = FALSE)
+  cat("Master metrics summary successfully exported to '", summary_file, "'\n", sep = "")
+  
+  # Venn diagram
+  venn_list <- list(genes_a, genes_b)
+  names(venn_list) <- c(label_a, label_b)
+  
+  venn.diagram(
+    x = venn_list,
+    filename = paste0("Venn_Diagram_", pair, ".png"),
+    imagetype = "png",
+    height = 2000,
+    width = 2000,
+    resolution = 300,
+    col = "black",
+    fill = c(fill_a, fill_b),
+    alpha = 0.3,
+    fontfamily = "sans",
+    cat.fontfamily = "sans",
+    cat.pos = c(-20, 20),
+    cat.dist = c(0.05, 0.05),
+    margin = 0.1,
+    cex = 1.5,
+    cat.cex = 1.3,
+    main = "",
+    main.cex = 2
+  )
+  
+  invisible(summary_matrix)
+}
+
+
+# -----------------------------------------------------------------------------
+# Run the comparisons
+# -----------------------------------------------------------------------------
+
+# MDA vs MCF7
+venn_expressed(g_data,
+               col_a = "DC", label_a = "MDA",  fill_a = "#4EC1C4",
+               col_b = "CC", label_b = "MCF7", fill_b = "#FF6B6B")
+
+# MCF7 vs MCF7 + CM
+# Same two fill colours as above, with MCF7 keeping #FF6B6B in both figures.
+venn_expressed(g_data,
+               col_a = "CC",  label_a = "MCF7",      fill_a = "#FF6B6B",
+               col_b = "CCM", label_b = "MCF7 + CM", fill_b = "#4EC1C4")
